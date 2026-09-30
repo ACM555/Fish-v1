@@ -1,0 +1,28 @@
+# ============================================================
+#  Fish-v1 —— 只上传本项目自己的 Python 源码
+#  游戏本体、引擎、DLL、日志等一律不上传
+# ============================================================
+
+# 1) 默认忽略一切
+*
+# 2) 但保留目录遍历（否则 git 不会进入子目录）
+!*/
+# 3) 放行所有 .py 源码
+!*.py
+# 4) 放行仓库自带的说明文件
+!.gitignore
+!README.md
+!AGENTS.md
+!push_python.ps1
+
+# 5) 排除引擎/官方自带的 Python 运行时、标准库、示例（不是我们写的代码）
+FishSim-V1.0062201（第三赛季）/WindowsNoEditor/Engine/**
+FishSim-V1.0062201（第三赛季）/WindowsNoEditor/Fish427/Binaries/Win64/Lib/**
+FishSim-V1.0062201（第三赛季）/WindowsNoEditor/Fish427/Binaries/Win64/Tools/**
+FishSim-V1.0062201（第三赛季）/WindowsNoEditor/Fish427/Binaries/Win64/tcl/**
+
+# 6) 缓存与日志
+__pycache__/
+*.pyc
+*.log
+log.txt
