@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  push_python.ps1
 #  把 D:\Fish 项目里被改动过的 Python 源码上传到
 #      https://github.com/ACM555/Fish-v1
@@ -42,7 +42,7 @@ if ($existing -notcontains 'origin') {
 
 # ---------- 2. 暂存 Python 源码 ----------
 # pathspec '*.py' 会匹配任意层级；被 .gitignore 排除的引擎标准库不会被加入。
-git add -- '*.py' '.gitignore' 'README.md' 'AGENTS.md' 'push_python.ps1'
+git add -- '*.py' '.gitignore' 'README.md' 'AGENTS.md' 'push_python.ps1' 'push_python.cmd'
 
 $staged = @(git diff --cached --name-only)
 if ($staged.Count -eq 0) {

@@ -17,8 +17,9 @@
 
 每次更新任意 `.py` 文件后，都要把改动上传到本仓库（<https://github.com/ACM555/Fish-v1>）：
 
-```powershell
-pwsh -File D:\Fish\push_python.ps1 -Message "本次改了什么"
+```bat
+cmd /c "D:\Fish\push_python.cmd" "本次改了什么"
 ```
 
-详见 [AGENTS.md](AGENTS.md)。
+脚本会自动 `git add` 所有 `.py`、提交、推送到 `origin/main`；游戏本体、引擎、二进制、日志都被
+`.gitignore` 排除，不会进入仓库。详见 [AGENTS.md](AGENTS.md)。

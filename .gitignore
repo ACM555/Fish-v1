@@ -14,6 +14,7 @@
 !README.md
 !AGENTS.md
 !push_python.ps1
+!push_python.cmd
 
 # 5) 排除引擎/官方自带的 Python 运行时、标准库、示例（不是我们写的代码）
 FishSim-V1.0062201（第三赛季）/WindowsNoEditor/Engine/**
