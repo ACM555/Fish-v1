@@ -27,3 +27,6 @@ __pycache__/
 *.pyc
 *.log
 log.txt
+
+# 7) 本地分析/自检脚本目录（不进仓库）
+_scratch/
