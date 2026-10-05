@@ -34,11 +34,15 @@
   4. 尾角 = **路径曲率前馈** + 航向 PID + 正弦摆尾：
      前馈按"当前速度 × 路径曲率"直接算出该转多少（ω = v·κ），尾巴立刻打到该有的角度，
      PID 只负责收拾剩余偏差；以前过弯全靠误差硬顶、稳态误差大、转不快，这是主要提速点。
-     航向误差大时自动收油，另有超速收油保护。
-  5. 胸鳍角度（wing_target_angel_left/right）用起来：
+  5. 循迹 = 纯跟踪瞄准 − Stanley 横向修正项（K_CROSS=2）：
+     纯跟踪跟得顺、允许少量切弯（路程短），横向修正项把切弯量压住，高速也不会一路切上柱子。
+     弯道限速全部放开，全程基本满推；跟不住时由两道保护自动减速：
+       · 瞄准误差收油（偏出目标方向越多越收）
+       · 跑宽收油（离路径越远越收）
+  6. 胸鳍角度（wing_target_angel_left/right）用起来：
      -90° = 推力完全朝前（z 与 pitch 都不变），再用深度误差在 ±25° 内微调，
      把老版本"鳍角恒为 0 → 推力朝上 → 一直上浮抬头"的问题彻底修掉。
-  6. 不需要状态机：路径本身已经按"绕1圈→穿门→绕2圈→终点"排好，
+  7. 不需要状态机：路径本身已经按"绕1圈→穿门→绕2圈→终点"排好，
      只要沿着走就满足裁判的路线要求。
 ================================================================================
 """
@@ -69,7 +73,8 @@ SAMPLE_STEP = 10.0               # 路径采样间距 mm
 # ---- 速度规划（整体提速：全程基本满推，靠"航向误差收油"自适应过弯） --------
 V_TOP = 900.0                    # 直道目标速度 mm/s（实际由推力上限决定）
 A_LAT_MAX = 3200.0               # 允许侧向加速度 mm/s^2
-YAW_RATE_MAX = 3.2               # 允许偏航角速度 rad/s（≈183°/s，弯道限速 v=w/kappa）
+YAW_RATE_MAX = 6.0               # 规划侧拐弯限速（rad/s）；放开，让鱼按自身推力上限跑，
+                                 # 跟不住时由"瞄准误差收油 / 跑宽收油"两道保护自动减速
 V_GATE = 600.0                   # 过门速度上限 mm/s（门缝 150 mm，路径在门区是直线，可快过）
 GATE_X = (-380.0, 300.0)         # 过门限速区间（x）
 MM_S_PER_FORCE = 14.0            # 推力→速度换算：每 1 单位推力约 14 mm/s
@@ -77,6 +82,9 @@ F_TOP = 48.0                     # 基础推力（限值 50，留 2 个单位余
 F_MAX = 50.0                     # 裁判规定的推进力上限
 FORCE_ERR_SLOW = 55.0            # 航向误差越大越收油（度）—— 过弯跟不住就自动减速
 FORCE_ERR_MIN = 0.45             # 收油下限系数
+DEV_SOFT = 40.0                  # 偏离路径超过这个距离开始收油（mm）
+DEV_HARD = 130.0                 # 偏离到这个距离收到下限
+DEV_MIN = 0.35                   # 偏离收油下限系数
 
 # ---- 摆尾（摆频与动力成正比：这是除胸鳍推力外的主要提速手段） --------------
 TAIL_AMP = 20.0                  # 摆尾幅度（度）
@@ -94,10 +102,12 @@ FF_LIMIT = 62.0                  # 前馈尾角上限（度）
 FF_LEAD = 3                      # 前馈提前量（点数，约 30 mm）
 
 # ---- 跟踪 -------------------------------------------------------------------
-LOOKAHEAD_T = 0.24               # 前视时间常数：L = v * 0.24（小一点贴线更紧，过弯少切角）
+LOOKAHEAD_T = 0.24               # 前视时间常数（仅用于取瞄准点/速度规划参考）
 LOOKAHEAD_MIN = 90.0
 LOOKAHEAD_MAX = 170.0
 GATE_LOOKAHEAD = 85.0            # 过门区间收紧前视，保证走直线
+K_CROSS = 2.0                    # Stanley 横向修正增益（1/s）：0=纯跟踪，2=贴线且不牺牲速度
+CT_MIN_V = 250.0                 # Stanley 分母速度下限 mm/s（防止低速时增益爆炸）
 SEARCH_BACK = 5                  # 最近点回看窗口（点数，10 mm/点）
 SEARCH_FWD = 20                  # 最近点前看窗口（点数）—— 防止跳段
 CURV_LOOKAHEAD = 28              # 曲率预看点数（约 280 mm，速度高了要早点看到弯）
@@ -295,6 +305,12 @@ class PurePursuit:
                 k = self.kappa[i]
         return k
 
+    def signed_cross_track(self, x: float, y: float):
+        """返回 (横向偏差 e>0 表示鱼在路径左侧, 路径切线方向 ph)。"""
+        px, py, ph = self.pts[self.idx]
+        nx, ny = -math.sin(ph), math.cos(ph)          # 路径左法线
+        return (x - px) * nx + (y - py) * ny, ph
+
     def curvature_now(self) -> float:
         """当前点带符号曲率（正=左转），含少量提前量，用于尾角前馈。"""
         return self.ks[min(self.n - 1, self.idx + FF_LEAD)]
@@ -355,6 +371,7 @@ class CourseFollower:
         self.last_force = 0.0
         self.last_wing = WING_ANGLE_LEVEL
         self.last_ff = 0.0
+        self.last_ct = 0.0
         self.dist_to_path = 0.0
         self.v_meas = 0.0            # 实测速度（低通），用于超速保护
         self._px = None
@@ -439,9 +456,17 @@ class CourseFollower:
             look = min(look, GATE_LOOKAHEAD)
         (tx, ty, _), at_end, remain = self.tracker.target(look)
 
-        # 3) 航向误差
-        err_deg = math.degrees(_wrap(math.atan2(ty - y, tx - x) - yaw))
+        # 3) 航向误差 = 纯跟踪瞄准误差 − Stanley 横向修正项
+        #    纯跟踪跟得顺、允许少量切弯（路程更短）；横向修正项负责把切弯量压住，
+        #    避免高速时一路切到柱子上。K_CROSS=0 即退化为纯跟踪。
+        aim_err_deg = math.degrees(_wrap(math.atan2(ty - y, tx - x) - yaw))
+        e_ct, ph = self.tracker.signed_cross_track(x, y)
+        v_eff = max(self.v_meas, CT_MIN_V)
+        ct_term = math.degrees(math.atan2(K_CROSS * e_ct, v_eff))
+        err_deg = aim_err_deg - ct_term
         self.last_err = err_deg
+        self.last_ct = e_ct
+        head_err_deg = aim_err_deg          # 收油只看"偏离目标方向"的量
 
         # 4) 尾角 = 曲率前馈 + 航向 PID 修正 + 正弦摆尾
         #    前馈按"当前速度 × 路径曲率"直接算出该转多少，PID 只管剩下的偏差，
@@ -464,7 +489,9 @@ class CourseFollower:
         # 5) 推进力：速度换算 + 大误差收油 + 超速收油 + 横滚差动 + 深度兜底，限幅 ±50
         base = v_des / MM_S_PER_FORCE
         base = min(base, F_TOP)
-        base *= max(FORCE_ERR_MIN, 1.0 - abs(err_deg) / FORCE_ERR_SLOW)
+        base *= max(FORCE_ERR_MIN, 1.0 - abs(head_err_deg) / FORCE_ERR_SLOW)
+        # 跑宽了自动刹车：既允许直道全力跑，又能在切弯外抛前把速度收回来
+        base *= max(DEV_MIN, 1.0 - max(0.0, self.dist_to_path - DEV_SOFT) / (DEV_HARD - DEV_SOFT))
         if self.v_meas > v_des * OVERSPEED_TRIP:          # 实测比目标快太多 → 收油
             base *= max(OVERSPEED_FLOOR, v_des / self.v_meas)
         if z > DEPTH_SOFT:
