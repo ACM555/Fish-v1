@@ -31,10 +31,12 @@
   3. 速度规划：前方曲率同时受"侧向加速度 ≤1500 mm/s²"和"偏航角速度 ≤2.4 rad/s"
      两个上限约束 → 弯道自动降速、直道全速；再由 v→推力 换算
      （按实测约 14 mm/s 每单位推力），最后硬性限幅 ±50。
-  4. 航向 PID → 尾关节偏角，叠加正弦摆尾提供主推进；航向误差大时自动收油；
-     两侧推进力按横滚差动修正，并做超速收油保护。
+  4. 尾角 = **路径曲率前馈** + 航向 PID + 正弦摆尾：
+     前馈按"当前速度 × 路径曲率"直接算出该转多少（ω = v·κ），尾巴立刻打到该有的角度，
+     PID 只负责收拾剩余偏差；以前过弯全靠误差硬顶、稳态误差大、转不快，这是主要提速点。
+     航向误差大时自动收油，另有超速收油保护。
   5. 胸鳍角度（wing_target_angel_left/right）用起来：
-     -90° = 推力完全朝前（z 与 pitch 都不变），再用深度误差在 ±20° 内微调，
+     -90° = 推力完全朝前（z 与 pitch 都不变），再用深度误差在 ±25° 内微调，
      把老版本"鳍角恒为 0 → 推力朝上 → 一直上浮抬头"的问题彻底修掉。
   6. 不需要状态机：路径本身已经按"绕1圈→穿门→绕2圈→终点"排好，
      只要沿着走就满足裁判的路线要求。
@@ -64,29 +66,32 @@ FINISH_STOP_X = 1265.0           # 冲过终点线后停推
 ORBIT_R = 230.0                  # 绕单柱圆半径（柱半宽 100 → 离柱面 130，留足转向余量）
 SAMPLE_STEP = 10.0               # 路径采样间距 mm
 
-# ---- 速度规划 ---------------------------------------------------------------
-V_TOP = 650.0                    # 直道目标速度 mm/s
-A_LAT_MAX = 1500.0               # 允许侧向加速度 mm/s^2（弯道限速 v=sqrt(a/kappa)）
-YAW_RATE_MAX = 2.4               # 允许偏航角速度 rad/s（≈137°/s，弯道限速 v=w/kappa，主约束）
-V_GATE = 340.0                   # 过门速度上限 mm/s
+# ---- 速度规划（整体提速：全程基本满推，靠"航向误差收油"自适应过弯） --------
+V_TOP = 900.0                    # 直道目标速度 mm/s（实际由推力上限决定）
+A_LAT_MAX = 3200.0               # 允许侧向加速度 mm/s^2
+YAW_RATE_MAX = 3.2               # 允许偏航角速度 rad/s（≈183°/s，弯道限速 v=w/kappa）
+V_GATE = 600.0                   # 过门速度上限 mm/s（门缝 150 mm，路径在门区是直线，可快过）
 GATE_X = (-380.0, 300.0)         # 过门限速区间（x）
 MM_S_PER_FORCE = 14.0            # 推力→速度换算：每 1 单位推力约 14 mm/s
-F_TOP = 45.0                     # 直道基础推力（限值 50）
+F_TOP = 48.0                     # 基础推力（限值 50，留 2 个单位余量）
 F_MAX = 50.0                     # 裁判规定的推进力上限
-FORCE_ERR_SLOW = 90.0            # 航向误差越大越收油（度）
-FORCE_ERR_MIN = 0.55             # 收油下限系数
+FORCE_ERR_SLOW = 55.0            # 航向误差越大越收油（度）—— 过弯跟不住就自动减速
+FORCE_ERR_MIN = 0.45             # 收油下限系数
 
-# ---- 摆尾 -------------------------------------------------------------------
-TAIL_AMP = 18.0                  # 摆尾幅度（度）
-TAIL_FREQ = 1.35                 # 摆尾频率 Hz（摆频与动力成正比）
+# ---- 摆尾（摆频与动力成正比：这是除胸鳍推力外的主要提速手段） --------------
+TAIL_AMP = 20.0                  # 摆尾幅度（度）
+TAIL_FREQ = 2.20                 # 摆尾频率 Hz（摆频与动力成正比，这是第二个推进源）
 TAIL_MAX = 80.0                  # 裁判规定的尾关节角度上限
 CORR_LIMIT = 55.0                # 航向 PID 输出的尾角上限（给摆尾留余量）
 
-# ---- 航向 PID ---------------------------------------------------------------
+# ---- 航向 PID + 曲率前馈 ----------------------------------------------------
 YAW_KP = 2.20                    # 沿用原工程实测可用的参数
 YAW_KI = 0.01
 YAW_KD = 0.95
 YAW_INTEGRAL_MAX = 50.0
+YAW_GAIN_FF = 3.0                # 偏航角速度增益（deg/s per 1°尾角），用于曲率前馈
+FF_LIMIT = 62.0                  # 前馈尾角上限（度）
+FF_LEAD = 3                      # 前馈提前量（点数，约 30 mm）
 
 # ---- 跟踪 -------------------------------------------------------------------
 LOOKAHEAD_T = 0.24               # 前视时间常数：L = v * 0.24（小一点贴线更紧，过弯少切角）
@@ -95,7 +100,7 @@ LOOKAHEAD_MAX = 170.0
 GATE_LOOKAHEAD = 85.0            # 过门区间收紧前视，保证走直线
 SEARCH_BACK = 5                  # 最近点回看窗口（点数，10 mm/点）
 SEARCH_FWD = 20                  # 最近点前看窗口（点数）—— 防止跳段
-CURV_LOOKAHEAD = 22              # 曲率预看点数（约 220 mm）
+CURV_LOOKAHEAD = 28              # 曲率预看点数（约 280 mm，速度高了要早点看到弯）
 
 # ---- 胸鳍角度：决定推力朝哪个方向使 ----------------------------------------
 #   侧视图实测含义：
@@ -115,8 +120,8 @@ ROLL_GAIN = 0.0                  # 横滚差动增益（原工程取 0，实测�
 DEPTH_SOFT = 1100.0              # 高于此高度兜底收油（正常靠鳍角控深，不该用到）
 DEPTH_SOFT_SCALE = 0.75
 DEPTH_LOW = 120.0                # 低于此高度不加限制
-OVERSPEED_TRIP = 1.30            # 实测速度超过目标 30% 就收油（防止弯道超速外切）
-OVERSPEED_FLOOR = 0.60           # 最多收到 60%
+OVERSPEED_TRIP = 1.20            # 实测速度超过目标 20% 就收油（防止弯道超速外切）
+OVERSPEED_FLOOR = 0.50           # 最多收到 50%
 SPEED_LP_TAU = 0.40              # 实测速度低通时间常数 s
 
 # ---- 调试 -------------------------------------------------------------------
@@ -256,12 +261,16 @@ class PurePursuit:
         self.pts = points
         self.n = len(points)
         self.s = [0.0] * self.n
-        self.kappa = [0.0] * self.n
+        self.kappa = [0.0] * self.n          # 无符号曲率（用于限速）
+        self.ks = [0.0] * self.n             # 带符号曲率（用于前馈：正=左转）
         for i in range(1, self.n):
             ds = math.hypot(points[i][0] - points[i - 1][0],
                             points[i][1] - points[i - 1][1])
             self.s[i] = self.s[i - 1] + ds
-            self.kappa[i] = abs(_wrap(points[i][2] - points[i - 1][2])) / ds if ds > 1e-6 else 0.0
+            dh = _wrap(points[i][2] - points[i - 1][2])
+            if ds > 1e-6:
+                self.kappa[i] = abs(dh) / ds
+                self.ks[i] = dh / ds
         self.total = self.s[-1]
         self.idx = 0
 
@@ -285,6 +294,10 @@ class PurePursuit:
             if self.kappa[i] > k:
                 k = self.kappa[i]
         return k
+
+    def curvature_now(self) -> float:
+        """当前点带符号曲率（正=左转），含少量提前量，用于尾角前馈。"""
+        return self.ks[min(self.n - 1, self.idx + FF_LEAD)]
 
     def target(self, lookahead: float):
         """返回 (瞄准点, 是否到路径末端, 剩余弧长)。"""
@@ -341,6 +354,7 @@ class CourseFollower:
         self.last_err = 0.0
         self.last_force = 0.0
         self.last_wing = WING_ANGLE_LEVEL
+        self.last_ff = 0.0
         self.dist_to_path = 0.0
         self.v_meas = 0.0            # 实测速度（低通），用于超速保护
         self._px = None
@@ -429,11 +443,19 @@ class CourseFollower:
         err_deg = math.degrees(_wrap(math.atan2(ty - y, tx - x) - yaw))
         self.last_err = err_deg
 
-        # 4) PID → 尾角修正，叠加正弦摆尾（推进）
+        # 4) 尾角 = 曲率前馈 + 航向 PID 修正 + 正弦摆尾
+        #    前馈按"当前速度 × 路径曲率"直接算出该转多少，PID 只管剩下的偏差，
+        #    这样尾巴能立刻打到该有的角度，稳态误差小、过弯不用靠误差硬顶。
+        v_ff = max(self.v_meas, 200.0)                     # mm/s（起步给下限，避免 0）
+        omega_req = v_ff * self.tracker.curvature_now()    # rad/s（正 = 左转）
+        tail_ff = math.degrees(omega_req) / YAW_GAIN_FF
+        tail_ff = max(-FF_LIMIT, min(FF_LIMIT, tail_ff))
+
         corr = self.pid.calculate(err_deg, dt)
         corr = max(-CORR_LIMIT, min(CORR_LIMIT, corr))
         swing = TAIL_AMP * math.sin(self.phase)
-        tail = max(-TAIL_MAX, min(TAIL_MAX, swing + corr))
+        tail = max(-TAIL_MAX, min(TAIL_MAX, swing + tail_ff + corr))
+        self.last_ff = tail_ff
 
         self.phase += 2.0 * math.pi * TAIL_FREQ * dt
         if self.phase > 2.0 * math.pi:
