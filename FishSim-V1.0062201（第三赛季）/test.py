@@ -67,38 +67,56 @@ TEAM_NAME = 'F05012589'          # 参赛队伍 ID（保持不变）
 START = (-1250.0, 0.0)
 FINISH = (1250.0, 0.0)
 FINISH_STOP_X = 1265.0           # 冲过终点线后停推
-ORBIT_R = 230.0                  # 绕单柱圆半径（柱半宽 100 → 离柱面 130，留足转向余量）
+ORBIT_R = 220.0                  # 绕单柱圆半径（柱半宽 100 + 鱼等效半宽 45 + 余量）
+PHI_EXIT1 = 55.0                 # 绕障碍1 的出圈极角(度)：出口航向 = 该角 - 90
+PHI_IN3 = 128.7                  # 绕障碍3 的入圈极角(度)：入口航向 = 该角 - 90
+RHO1 = 500.0                     # 出圈后拉平到 y=0 的左转弧半径（大半径=对转向能力要求低）
 SAMPLE_STEP = 10.0               # 路径采样间距 mm
 
-# ---- 速度规划（整体提速：全程基本满推，靠"航向误差收油"自适应过弯） --------
-V_TOP = 900.0                    # 直道目标速度 mm/s（实际由推力上限决定）
-A_LAT_MAX = 3200.0               # 允许侧向加速度 mm/s^2
-YAW_RATE_MAX = 6.0               # 规划侧拐弯限速（rad/s）；放开，让鱼按自身推力上限跑，
-                                 # 跟不住时由"瞄准误差收油 / 跑宽收油"两道保护自动减速
-V_GATE = 600.0                   # 过门速度上限 mm/s（门缝 150 mm，路径在门区是直线，可快过）
+# ---- 速度规划（真鱼实测：尾舵打满约 76°/s，v=490 时最小转弯半径约 370mm） ----
+V_TOP = 520.0                    # 直道目标速度 mm/s
+A_LAT_MAX = 1600.0               # 允许侧向加速度 mm/s^2
+YAW_RATE_MAX = 1.75              # 允许偏航角速度 rad/s ≈100°/s（弯道限速 v=w·R，主约束）
+                                 # 绕柱段因此限到 1.75×220 ≈ 385 mm/s；放到 1.95 会冲出绕柱圈
+V_GATE = 430.0                   # 过门速度上限 mm/s
 GATE_X = (-380.0, 300.0)         # 过门限速区间（x）
 MM_S_PER_FORCE = 14.0            # 推力→速度换算：每 1 单位推力约 14 mm/s
-F_TOP = 48.0                     # 基础推力（限值 50，留 2 个单位余量）
+F_TOP = 48.0                     # 基础推力（限值 50）
 F_MAX = 50.0                     # 裁判规定的推进力上限
-FORCE_ERR_SLOW = 55.0            # 航向误差越大越收油（度）—— 过弯跟不住就自动减速
-FORCE_ERR_MIN = 0.45             # 收油下限系数
-DEV_SOFT = 40.0                  # 偏离路径超过这个距离开始收油（mm）
-DEV_HARD = 130.0                 # 偏离到这个距离收到下限
-DEV_MIN = 0.35                   # 偏离收油下限系数
+FORCE_ERR_SLOW = 95.0            # 航向误差收油（度）：绕柱段稳态就有 ~20° 滞后误差，
+FORCE_ERR_MIN = 0.78             #   刹车太狠会把鱼自己按住（实测绕柱速度被压到 300 而非 365）
+DEV_SOFT = 60.0                  # 偏离路径超过这个距离开始收油（mm）
+DEV_HARD = 200.0                 # 偏离到这个距离收到下限
+DEV_MIN = 0.50                   # 偏离收油下限系数
 
 # ---- 摆尾（摆频与动力成正比：这是除胸鳍推力外的主要提速手段） --------------
-TAIL_AMP = 20.0                  # 摆尾幅度（度）
-TAIL_FREQ = 2.20                 # 摆尾频率 Hz（摆频与动力成正比，这是第二个推进源）
+TAIL_AMP = 20.0                  # 摆尾幅度（度）：绕柱段宜小不宜大（幅值大=速度快=转不过来）
+TAIL_FREQ = 2.40                 # 摆尾频率 Hz（摆频与动力成正比，这是第二个推进源）
 TAIL_MAX = 80.0                  # 裁判规定的尾关节角度上限
-CORR_LIMIT = 55.0                # 航向 PID 输出的尾角上限（给摆尾留余量）
+DC_LIM = 58.0                    # 尾角直流偏置上限：58 + 幅值 22 = 80，正好用满不越限
+
+# ---- 蟹角(crab angle)补偿 ---------------------------------------------------
+# 实测：鱼的机头朝向 yaw 与速度方向 psi_v 之间固定差 beta ≈ -11.5°（转圈时）。
+# 不补偿的后果：稳态绕柱半径 = 目标半径 + ld·tan(beta)，实际会系统性内切 ~30mm，
+# 在 R=220 时等效半径掉到 ~190，逼近"柱半对角 141.4 + 鱼等效半宽 45 = 186.4"的安全线。
+# 只在绕柱大曲率段补偿（对齐弧不加，否则落点整体偏移）。
+BETA_ARC = -0.20                 # rad，≈ -11.5°
+BETA_KAPPA_MIN = 1.0 / 320.0     # 曲率大于此值才认为在绕柱
+
+# ---- 卡死脱困 ---------------------------------------------------------------
+STUCK_V = 70.0                   # 实测速度低于此值视为卡住 mm/s
+STUCK_T = 0.7                    # 持续这么久就触发脱困 s
+ESCAPE_T = 0.6                   # 脱困持续时长 s
+ESCAPE_AMP = 30.0                # 脱困时的摆尾幅值
+PILLAR_CENTERS = [(-750.0, 0.0), (750.0, 0.0), (0.0, 175.0), (0.0, -175.0)]
 
 # ---- 航向 PID + 曲率前馈 ----------------------------------------------------
 YAW_KP = 2.20                    # 沿用原工程实测可用的参数
 YAW_KI = 0.01
 YAW_KD = 0.95
 YAW_INTEGRAL_MAX = 50.0
-YAW_GAIN_FF = 3.0                # 偏航角速度增益（deg/s per 1°尾角），用于曲率前馈
-FF_LIMIT = 62.0                  # 前馈尾角上限（度）
+YAW_GAIN_FF = 2.8                # 偏航角速度增益（deg/s per 1°尾角），用于曲率前馈
+FF_LIMIT = 50.0                  # 前馈+修正合成的直流偏置上限（度）
 FF_LEAD = 3                      # 前馈提前量（点数，约 30 mm）
 
 # ---- 跟踪 -------------------------------------------------------------------
@@ -150,6 +168,13 @@ Point = Tuple[float, float, float]      # (x, y, heading[rad])
 def _wrap(a: float) -> float:
     """把角度标准化到 (-pi, pi]。"""
     return math.atan2(math.sin(a), math.cos(a))
+
+
+def _dist_to_rect(px, py, cx, cy, half):
+    """点到方柱表面的距离（柱内为 0）。"""
+    dx = max(cx - half - px, 0.0, px - (cx + half))
+    dy = max(cy - half - py, 0.0, py - (cy + half))
+    return math.hypot(dx, dy)
 
 
 def _line(p0, p1, step: float) -> List[Point]:
@@ -206,51 +231,80 @@ def _lane_change(pts: List[Point], step: float, x0: float, y0: float, dy: float,
     return dx
 
 
+def _tangent_phi(point, center, R):
+    """从 point 向"以 center 为圆心、半径 R"的圆作切线，返回两个切点的极角（弧度）。"""
+    dx, dy = point[0] - center[0], point[1] - center[1]
+    d = math.hypot(dx, dy)
+    beta = math.acos(max(-1.0, min(1.0, R / d)))
+    a = math.atan2(dy, dx)
+    return a - beta, a + beta
+
+
 def build_course(step: float = SAMPLE_STEP) -> List[Point]:
     """
-    生成整条赛道（处处相切连续，全部曲线半径 = ORBIT_R，离柱面 >= 130 mm）：
+    生成整条赛道（处处相切连续）：
 
-      起点 ─S弯抬到 y=+230 ─直线─ 障碍1 绕 1 圈(顺时针)
-           ─S弯压回 y=0 ─直线穿过障碍2 门缝(y=0)
-           ─S弯抬到 y=+230 ─ 障碍3 绕 2 圈(顺时针) ─S弯压回 y=0 ─直线─ 终点
+      起点 ─切线─ 绕障碍1 一圈多(顺时针) ─直线下切─ 大半径左转弧落到 y=0
+           ─直线穿过障碍2 门缝─ 大半径左转弧切到障碍3 入口
+           ─绕障碍3 两圈多(顺时针) ─切线─ 终点
 
-    因为横向移位量 = 绕柱圆半径，S 弯的第二段圆弧正好落在绕柱圆上（半径相同、相切相接），
-    所以全路径只有一种曲率 1/230，弯道不用额外减速。
+    与"绕一圈再 S 形变道"的老写法相比，这里靠**绕柱的出/入极角**天然完成横向移位：
+      出圈时航向已经是斜向下（-35°），只用一段半径 500mm 的缓弧就能拉平到 y=0；
+      进门后再用一段半径 ~780mm 的缓弧切进障碍3 的入口点。
+    对齐只花 ~74° 转向（老写法 S 弯要 480°），而且半径大、对转向能力要求低——
+    实测这条鱼尾舵打满也只有 ~76°/s 偏航率（v=490 时最小转弯半径约 370mm），
+    老写法半径 230 的 S 弯它根本转不过来。
     """
     pts: List[Point] = [(START[0], START[1], 0.0)]
-    r_lane = ORBIT_R
+    R = ORBIT_R
+    C1 = (-750.0, 0.0)
+    C3 = (750.0, 0.0)
 
-    def line(p0, p1):
-        pts.extend(_line(p0, p1, step))
+    # ---- ① 起点沿切线进绕柱1 ----
+    pa, pb = _tangent_phi(START, C1, R)
+    phi_in1 = pa if math.sin(pa) > math.sin(pb) else pb
+    T1_in = (C1[0] + R * math.cos(phi_in1), C1[1] + R * math.sin(phi_in1))
+    pts.extend(_line(START, T1_in, step))
 
-    def arc(center, r, a0, a1):
-        pts.extend(_arc(center, r, a0, a1, step))
+    # ---- ② 障碍1：顺时针绕 1 圈 + 多转到出圈极角 ----
+    phi_ex1 = math.radians(PHI_EXIT1)
+    T1_out = (C1[0] + R * math.cos(phi_ex1), C1[1] + R * math.sin(phi_ex1))
+    pts.extend(_arc(C1, R, math.degrees(phi_in1), math.degrees(phi_ex1) - 360.0, step))
 
-    # --- ① 起步：S 弯抬到 y=+200 ---
-    dx1 = _lane_change(pts, step, -1250.0, 0.0, ORBIT_R, r_lane)
-    x_after_up1 = -1250.0 + dx1
+    # ---- ③ 沿出圈航向直行 → 大半径左转弧拉平到 y=0 ----
+    th1 = phi_ex1 - math.pi / 2.0                       # 顺时针出圈时的航向
+    rho1 = RHO1
+    t1 = (rho1 * (1.0 - math.cos(th1)) - T1_out[1]) / math.sin(th1)
+    PS1 = (T1_out[0] + t1 * math.cos(th1), T1_out[1] + t1 * math.sin(th1))
+    xE = PS1[0] - rho1 * math.sin(th1)
+    pts.extend(_line(T1_out, PS1, step))
+    a_b1 = math.degrees(math.atan2(PS1[1] - rho1, PS1[0] - xE))
+    pts.extend(_arc((xE, rho1), rho1, a_b1, -90.0, step))     # 结束于 (xE, 0)，航向 0
 
-    # --- ② 直线接障碍1 绕圈起点 (-750, +200) ---
-    line((x_after_up1, ORBIT_R), (-750.0, ORBIT_R))
+    # ---- ④ 障碍3 入口点与进门后的对齐弧 ----
+    phi_in3 = math.radians(PHI_IN3)
+    E2 = (C3[0] + R * math.cos(phi_in3), C3[1] + R * math.sin(phi_in3))
+    th2 = phi_in3 - math.pi / 2.0                       # 顺时针入圈时的航向
+    rho2 = E2[1] / (1.0 - math.cos(th2))
+    xS2 = E2[0] - rho2 * math.sin(th2)
 
-    # --- ③ 障碍1 (-750, 0)：顺时针绕 1 圈 ---
-    arc((-750.0, 0.0), ORBIT_R, 90.0, 90.0 - 360.0)
+    # ---- ⑤ 沿 y=0 直线穿过障碍2 的 150 mm 门缝 ----
+    pts.extend(_line((xE, 0.0), (xS2, 0.0), step))
 
-    # --- ④ S 弯压回 y=0（起始圆弧与绕柱圆重合，等于多绕 60°） ---
-    dx2 = _lane_change(pts, step, -750.0, ORBIT_R, -ORBIT_R, r_lane)
+    # ---- ⑥ 大半径左转弧切到障碍3 入口点 E2 ----
+    pts.extend(_arc((xS2, rho2), rho2, -90.0, -90.0 + math.degrees(th2), step))
 
-    # --- ⑤ 沿 y = 0 直线穿过障碍2 的 150 mm 门缝(x∈[-100,100]) ---
-    line((-750.0 + dx2, 0.0), (750.0 - dx1, 0.0))
+    # ---- ⑦ 障碍3：顺时针绕 2 圈 + 多转到出圈极角 ----
+    pa, pb = _tangent_phi(FINISH, C3, R)
+    phi_out3 = pa if math.sin(pa) > math.sin(pb) else pb
+    T3_out = (C3[0] + R * math.cos(phi_out3), C3[1] + R * math.sin(phi_out3))
+    pts.extend(_arc(C3, R, math.degrees(phi_in3), math.degrees(phi_out3) - 720.0, step))
 
-    # --- ⑥ S 弯抬到 y=+200，正好切到障碍3 绕圈起点 (750, +200) ---
-    _lane_change(pts, step, 750.0 - dx1, 0.0, ORBIT_R, r_lane)
-
-    # --- ⑦ 障碍3 (750, 0)：顺时针绕 2 圈 ---
-    arc((750.0, 0.0), ORBIT_R, 90.0, 90.0 - 720.0)
-
-    # --- ⑧ S 弯压回 y=0，冲终点 ---
-    dx3 = _lane_change(pts, step, 750.0, ORBIT_R, -ORBIT_R, r_lane)
-    line((750.0 + dx3, 0.0), (1250.0, 0.0))
+    # ---- ⑧ 沿切线冲到终点并留 170mm 余量（裁判绕完第二圈即计时结束） ----
+    ux, uy = FINISH[0] - T3_out[0], FINISH[1] - T3_out[1]
+    un = math.hypot(ux, uy)
+    EXT = (FINISH[0] + ux / un * 170.0, FINISH[1] + uy / un * 170.0)
+    pts.extend(_line(T3_out, EXT, step))
 
     return pts
 
@@ -371,11 +425,17 @@ class CourseFollower:
         self.last_force = 0.0
         self.last_wing = WING_ANGLE_LEVEL
         self.last_ff = 0.0
+        self.last_dc = 0.0
         self.last_ct = 0.0
         self.dist_to_path = 0.0
         self.v_meas = 0.0            # 实测速度（低通），用于超速保护
         self._px = None
         self._py = None
+        self.t_acc = 0.0             # 内部计时（脱困用）
+        self.stuck_t = 0.0
+        self.esc_until = -1.0
+        self.esc_dir = 0.0
+        self.esc_flip = 1.0
 
         self.log_file = None
         self.csv_file = None
@@ -456,30 +516,59 @@ class CourseFollower:
             look = min(look, GATE_LOOKAHEAD)
         (tx, ty, _), at_end, remain = self.tracker.target(look)
 
-        # 3) 航向误差 = 纯跟踪瞄准误差 − Stanley 横向修正项
+        # 3) 航向误差 = 纯跟踪瞄准误差 − Stanley 横向修正项 + 蟹角补偿
         #    纯跟踪跟得顺、允许少量切弯（路程更短）；横向修正项负责把切弯量压住，
         #    避免高速时一路切到柱子上。K_CROSS=0 即退化为纯跟踪。
         aim_err_deg = math.degrees(_wrap(math.atan2(ty - y, tx - x) - yaw))
         e_ct, ph = self.tracker.signed_cross_track(x, y)
         v_eff = max(self.v_meas, CT_MIN_V)
         ct_term = math.degrees(math.atan2(K_CROSS * e_ct, v_eff))
-        err_deg = aim_err_deg - ct_term
+        # 绕柱大曲率段补蟹角：让机头朝路径方向再偏 beta，速度方向才真正贴住圆
+        k_now = self.tracker.curvature_now()
+        crab = math.degrees(BETA_ARC) if abs(k_now) > BETA_KAPPA_MIN else 0.0
+        err_deg = aim_err_deg - ct_term + crab
         self.last_err = err_deg
         self.last_ct = e_ct
         head_err_deg = aim_err_deg          # 收油只看"偏离目标方向"的量
 
-        # 4) 尾角 = 曲率前馈 + 航向 PID 修正 + 正弦摆尾
-        #    前馈按"当前速度 × 路径曲率"直接算出该转多少，PID 只管剩下的偏差，
-        #    这样尾巴能立刻打到该有的角度，稳态误差小、过弯不用靠误差硬顶。
-        v_ff = max(self.v_meas, 200.0)                     # mm/s（起步给下限，避免 0）
-        omega_req = v_ff * self.tracker.curvature_now()    # rad/s（正 = 左转）
-        tail_ff = math.degrees(omega_req) / YAW_GAIN_FF
-        tail_ff = max(-FF_LIMIT, min(FF_LIMIT, tail_ff))
+        # 3b) 卡死检测与脱困：撞柱后如果速度掉到几十，光靠控制器会一直顶在柱子上
+        self.t_acc += dt
+        if not self.finished and self.v_meas < STUCK_V:
+            self.stuck_t += dt
+        else:
+            self.stuck_t = 0.0
+        if self.stuck_t > STUCK_T and self.t_acc > self.esc_until:
+            near, nd = None, 1e9
+            for (cx, cy) in PILLAR_CENTERS:
+                dd = _dist_to_rect(x, y, cx, cy, 100.0)
+                if dd < nd:
+                    nd, near = dd, (cx, cy)
+            if near is not None:
+                base = math.atan2(y - near[1], x - near[0])
+                self.esc_dir = _wrap(base + self.esc_flip * 1.2)
+                self.esc_flip = -self.esc_flip
+                self.esc_until = self.t_acc + ESCAPE_T
+                self.stuck_t = 0.0
 
-        corr = self.pid.calculate(err_deg, dt)
-        corr = max(-CORR_LIMIT, min(CORR_LIMIT, corr))
-        swing = TAIL_AMP * math.sin(self.phase)
-        tail = max(-TAIL_MAX, min(TAIL_MAX, swing + tail_ff + corr))
+        # 4) 尾角 = 曲率前馈 + 航向 PID 修正，再叠加正弦摆尾
+        #    （脱困期间改为朝"背离最近柱子"的方向满舵冲出去）
+        if self.t_acc < self.esc_until:
+            e_esc = _wrap(self.esc_dir - yaw)
+            dc = max(-DC_LIM, min(DC_LIM, math.degrees(YAW_KP * e_esc) / 1.9))
+            amp_use = ESCAPE_AMP
+            tail_ff = 0.0
+        else:
+            v_ff = max(self.v_meas, 200.0)                 # mm/s（起步给下限，避免 0）
+            omega_req = v_ff * self.tracker.curvature_now()  # rad/s（正 = 左转）
+            tail_ff = math.degrees(omega_req) / YAW_GAIN_FF
+            tail_ff = max(-FF_LIMIT, min(FF_LIMIT, tail_ff))
+            corr = self.pid.calculate(err_deg, dt)
+            # 直流偏置负责转向，正弦摆尾负责推进；两者之和不超过 ±80
+            dc = max(-DC_LIM, min(DC_LIM, tail_ff + corr))
+            amp_use = TAIL_AMP
+        swing = amp_use * math.sin(self.phase)
+        tail = max(-TAIL_MAX, min(TAIL_MAX, dc + swing))
+        self.last_dc = dc
         self.last_ff = tail_ff
 
         self.phase += 2.0 * math.pi * TAIL_FREQ * dt
