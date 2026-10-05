@@ -32,8 +32,11 @@
      两个上限约束 → 弯道自动降速、直道全速；再由 v→推力 换算
      （按实测约 14 mm/s 每单位推力），最后硬性限幅 ±50。
   4. 航向 PID → 尾关节偏角，叠加正弦摆尾提供主推进；航向误差大时自动收油；
-     两侧推进力按横滚差动修正，并做深度保护。
-  5. 不需要状态机：路径本身已经按"绕1圈→穿门→绕2圈→终点"排好，
+     两侧推进力按横滚差动修正，并做超速收油保护。
+  5. 胸鳍角度（wing_target_angel_left/right）用起来：
+     -90° = 推力完全朝前（z 与 pitch 都不变），再用深度误差在 ±20° 内微调，
+     把老版本"鳍角恒为 0 → 推力朝上 → 一直上浮抬头"的问题彻底修掉。
+  6. 不需要状态机：路径本身已经按"绕1圈→穿门→绕2圈→终点"排好，
      只要沿着走就满足裁判的路线要求。
 ================================================================================
 """
@@ -94,11 +97,27 @@ SEARCH_BACK = 5                  # 最近点回看窗口（点数，10 mm/点）
 SEARCH_FWD = 20                  # 最近点前看窗口（点数）—— 防止跳段
 CURV_LOOKAHEAD = 22              # 曲率预看点数（约 220 mm）
 
-# ---- 姿态/深度保护 ----------------------------------------------------------
+# ---- 胸鳍角度：决定推力朝哪个方向使 ----------------------------------------
+#   侧视图实测含义：
+#       0  = 推力朝上  （原框架从未赋值，默认就是 0 → 老版本鱼一直上浮、抬头）
+#     -45  = 朝后上（倒退）
+#     -90  = 完全朝前（z 不变、pitch 不变）← 水平推进
+#    -100  = 朝前偏下（缓缓下潜）
+WING_ANGLE_LEVEL = -90.0         # 水平推进角（把"往上顶"改成"往前推"）
+DEPTH_TARGET = 340.0             # 目标深度（= 起点/终点高度 340）
+DEPTH_ANGLE_KP = 0.10            # 深度误差 → 鳍角修正（度/mm）
+DEPTH_ANGLE_LIMIT = 25.0         # 鳍角修正上限（度），保证推力主体仍然朝前
+WING_ANGLE_MIN = -115.0          # 鳍角可用范围（再往下推力方向太斜，前进分量掉太多）
+WING_ANGLE_MAX = -70.0
+
+# ---- 姿态/推进保护 ----------------------------------------------------------
 ROLL_GAIN = 0.0                  # 横滚差动增益（原工程取 0，实测更稳）
-DEPTH_SOFT = 950.0               # 高于此高度开始收油（防止上浮撞水面）
+DEPTH_SOFT = 1100.0              # 高于此高度兜底收油（正常靠鳍角控深，不该用到）
 DEPTH_SOFT_SCALE = 0.75
-DEPTH_LOW = 130.0                # 低于此高度不加限制
+DEPTH_LOW = 120.0                # 低于此高度不加限制
+OVERSPEED_TRIP = 1.30            # 实测速度超过目标 30% 就收油（防止弯道超速外切）
+OVERSPEED_FLOOR = 0.60           # 最多收到 60%
+SPEED_LP_TAU = 0.40              # 实测速度低通时间常数 s
 
 # ---- 调试 -------------------------------------------------------------------
 VERBOSE = True
@@ -321,7 +340,11 @@ class CourseFollower:
         self.finished = False
         self.last_err = 0.0
         self.last_force = 0.0
+        self.last_wing = WING_ANGLE_LEVEL
         self.dist_to_path = 0.0
+        self.v_meas = 0.0            # 实测速度（低通），用于超速保护
+        self._px = None
+        self._py = None
 
         self.log_file = None
         self.csv_file = None
@@ -339,7 +362,8 @@ class CourseFollower:
             self.log_file = None
         try:
             self.csv_file = open('fish_debug_log.csv', 'w', encoding='utf-8')
-            self.csv_file.write('Time(s),Progress,PosX,PosY,PosZ,Yaw(deg),Tail(deg),ThrustL,ThrustR,ErrToPath(mm)\n')
+            self.csv_file.write('Time(s),Progress,PosX,PosY,PosZ,Yaw(deg),Tail(deg),'
+                                'ThrustL,ThrustR,ErrToPath(mm),Speed(mm/s),WingAngle(deg)\n')
             self.csv_file.flush()
         except Exception:
             self.csv_file = None
@@ -383,8 +407,14 @@ class CourseFollower:
 
     # ---------------- 单帧控制 ----------------
     def control(self, x: float, y: float, z: float, yaw: float, roll_deg: float,
-                dt: float) -> Tuple[float, float, float, float]:
-        """返回 (tail_angle, force_left, force_right, heading_error_deg)。"""
+                dt: float) -> Tuple[float, float, float, float, float]:
+        """返回 (tail_angle, force_left, force_right, wing_angle, heading_error_deg)。"""
+        # 0) 实测速度（低通），用于超速保护
+        if self._px is not None and dt > 1e-6:
+            v_inst = math.hypot(x - self._px, y - self._py) / dt
+            self.v_meas += (v_inst - self.v_meas) * min(1.0, dt / SPEED_LP_TAU)
+        self._px, self._py = x, y
+
         # 1) 跟踪进度
         self.dist_to_path = self.tracker.advance(x, y)
 
@@ -409,10 +439,12 @@ class CourseFollower:
         if self.phase > 2.0 * math.pi:
             self.phase -= 2.0 * math.pi
 
-        # 5) 推进力：速度闭环换算 + 大误差收油 + 横滚差动 + 深度保护，限幅 ±50
+        # 5) 推进力：速度换算 + 大误差收油 + 超速收油 + 横滚差动 + 深度兜底，限幅 ±50
         base = v_des / MM_S_PER_FORCE
         base = min(base, F_TOP)
         base *= max(FORCE_ERR_MIN, 1.0 - abs(err_deg) / FORCE_ERR_SLOW)
+        if self.v_meas > v_des * OVERSPEED_TRIP:          # 实测比目标快太多 → 收油
+            base *= max(OVERSPEED_FLOOR, v_des / self.v_meas)
         if z > DEPTH_SOFT:
             base *= DEPTH_SOFT_SCALE
         elif z < DEPTH_LOW:
@@ -423,13 +455,21 @@ class CourseFollower:
         fr = max(-F_MAX, min(F_MAX, base + roll_correct))
         self.last_force = base
 
-        # 6) 冲过终点线后停推
+        # 6) 胸鳍角度：-90° = 完全朝前（z 不变、pitch 不变），再用深度误差微调：
+        #    偏高 → 角度更负（朝前偏下，下潜）；偏低 → 角度回抬（朝前偏上，上浮）
+        z_err = DEPTH_TARGET - z
+        wing = WING_ANGLE_LEVEL + max(-DEPTH_ANGLE_LIMIT,
+                                      min(DEPTH_ANGLE_LIMIT, DEPTH_ANGLE_KP * z_err))
+        wing = max(WING_ANGLE_MIN, min(WING_ANGLE_MAX, wing))
+        self.last_wing = wing
+
+        # 7) 冲过终点线后停推
         if at_end and x >= FINISH_STOP_X:
             self.finished = True
         if self.finished:
-            return 0.0, 0.0, 0.0, err_deg
+            return 0.0, 0.0, 0.0, WING_ANGLE_LEVEL, err_deg
 
-        return tail, fl, fr, err_deg
+        return tail, fl, fr, wing, err_deg
 
 
 # =============================================================================
@@ -457,32 +497,36 @@ def lcb(fish_info):
         yaw = math.atan2(float(fish_info.forward.y), float(fish_info.forward.x))
         roll_deg = float(fish_info.rot.x)          # 平台旋转量单位为"度"
 
-        tail, fl, fr, err = _follower.control(x, y, z, yaw, roll_deg, dt)
+        tail, fl, fr, wing, err = _follower.control(x, y, z, yaw, roll_deg, dt)
 
         ctrl = mycue.FishCtrlInfo()
         ctrl.tail_target_angel = tail
         ctrl.wing_force_left = fl
         ctrl.wing_force_right = fr
-        # 胸鳍角度保持 0（沿 y 轴自由旋转，本策略不需要矢量推进）
-        ctrl.wing_target_angel_left = 0.0
-        ctrl.wing_target_angel_right = 0.0
+        # 胸鳍角度：-90° 水平推进（原框架恒为 0 = 推力朝上，才会一直上浮、抬头）
+        ctrl.wing_target_angel_left = wing
+        ctrl.wing_target_angel_right = wing
         _publisher.publish(ctrl)
 
         # ---- 调试输出 ----
         if _follower.frames % LOG_EVERY == 0:
-            line = ('%.2f,%.4f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f'
+            line = ('%.2f,%.4f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f'
                     % (now, _follower.tracker.progress, x, y, z,
-                       math.degrees(yaw), tail, fl, fr, _follower.dist_to_path))
+                       math.degrees(yaw), tail, fl, fr, _follower.dist_to_path,
+                       _follower.v_meas, wing))
             _follower._log(line)
             if VERBOSE:
                 print('t=%5.2fs 进度=%5.1f%%  pos=(%7.1f,%7.1f,%6.1f)  yaw=%6.1f°  '
-                      '尾=%6.1f°  推力=(%4.1f,%4.1f)  偏离=%5.1fmm  误差=%6.1f°'
+                      '尾=%6.1f°  推力=(%4.1f,%4.1f)  鳍角=%6.1f°  v=%4.0fmm/s  '
+                      '偏离=%5.1fmm  误差=%6.1f°'
                       % (now, _follower.tracker.progress * 100.0, x, y, z,
-                         math.degrees(yaw), tail, fl, fr, _follower.dist_to_path, err))
+                         math.degrees(yaw), tail, fl, fr, wing, _follower.v_meas,
+                         _follower.dist_to_path, err))
         if _follower.frames % CSV_EVERY == 0:
-            _follower._csv('%.2f,%.4f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f'
+            _follower._csv('%.2f,%.4f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f'
                            % (now, _follower.tracker.progress, x, y, z,
-                              math.degrees(yaw), tail, fl, fr, _follower.dist_to_path))
+                              math.degrees(yaw), tail, fl, fr, _follower.dist_to_path,
+                              _follower.v_meas, wing))
     except Exception as exc:      # 单帧异常不能让 DDS 回调线程挂掉
         try:
             print('[lcb error] %r' % (exc,))
